@@ -72,7 +72,7 @@ Video-RAG Ultra 是一个基于 RAG (Retrieval-Augmented Generation) 技术的�
 ```bash
 # 克隆项目
 git clone <repository-url>
-cd Video-RAG
+cd Video-RAG-Ultra
 
 # 安装 Python 依赖
 pip install -r requirements.txt
