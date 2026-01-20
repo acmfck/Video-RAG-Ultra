@@ -1,0 +1,44 @@
+# ==========================================
+# Video-RAG Ultra 依赖包
+# ==========================================
+
+# 核心深度学习框架
+torch>=2.0.0
+torchvision>=0.15.0
+
+# HuggingFace 生态系统
+transformers>=4.37.0
+sentence-transformers>=2.2.0
+
+# 视觉模型
+# CLIP 从 GitHub 安装（使用镜像加速）
+# git+https://github.com/openai/CLIP.git
+git+https://mirror.ghproxy.com/https://github.com/openai/CLIP.git
+
+# 音频处理
+openai-whisper>=20231117
+
+# 向量检索
+# 注意：如果有 GPU，可以使用 faiss-gpu 替代 faiss-cpu 以获得更快速度
+faiss-cpu>=1.7.4
+# faiss-gpu>=1.7.4  # 如果有 GPU，取消注释此行并注释上面的 faiss-cpu
+
+# Web 界面
+gradio>=4.0.0
+
+# 视频/图像处理
+opencv-python>=4.8.0
+Pillow>=10.0.0
+ffmpeg-python>=0.2.0
+
+# 数值计算
+numpy>=1.24.0
+
+# 工具库
+ftfy>=6.1.0
+regex>=2023.0.0
+tqdm>=4.65.0
+
+# 系统依赖（需要单独安装）
+# - ffmpeg: sudo apt-get install ffmpeg 或 brew install ffmpeg
+# - CUDA (可选): 用于 GPU 加速
