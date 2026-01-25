@@ -24,6 +24,7 @@ Video-RAG Ultra 是一个基于 RAG (Retrieval-Augmented Generation) 技术的�
 
 - 🎥 **视觉理解**：基于 CLIP 的关键帧语义检索，精准定位视频画面
 - 🎤 **音频理解**：Whisper 语音转录 + 文本语义检索，理解视频对话内容
+- 🧩 **音频分段与缓存**：超长音频分段转录，自动缓存转录结果，加速二次构建
 - 🤖 **智能问答**：多模态证据融合，生成可解释的答案
 - ⚡ **多GPU加速**：模型分散加载，充分利用多卡资源
 - 🎨 **精美界面**：现代化 Web UI，实时展示检索证据
@@ -35,7 +36,9 @@ Video-RAG Ultra 是一个基于 RAG (Retrieval-Augmented Generation) 技术的�
 ### 多模态检索
 
 - **视觉检索**：使用 CLIP (ViT-B/32) 对视频关键帧进行向量化，支持文本查询检索相关画面
-- **音频检索**：使用 Whisper large-v3 进行语音转录，结合 Sentence-Transformer 进行语义检索
+- **音频检索**：使用 Whisper 进行语音转录，结合 Sentence-Transformer 进行语义检索
+- **分段转录**：默认按 300 秒分段，避免超长视频转录过慢或失败
+- **结果缓存**：转录分段自动缓存，重复处理同一视频时显著加速
 - **联合检索**：同时检索视觉和音频证据，提供更全面的上下文信息
 
 ### 智能问答
@@ -271,13 +274,27 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 # CUDA 设备（可选，默认自动分配）
 export CUDA_VISIBLE_DEVICES=0,1,2
+
+# （可选）音频转录缓存目录（默认：../data/embeddings/audio_cache）
+# export AUDIO_CACHE_DIR=../data/embeddings/audio_cache
 ```
 
 ### 模型配置
 
 - **CLIP 模型**：默认使用 `ViT-B/32`，可在 `VideoRetriever` 初始化时修改
-- **Whisper 模型**：默认使用 `large-v3`，可在 `AudioRetriever` 中修改
+- **Whisper 模型**：默认使用 `medium`，可在 `AudioRetriever` 中修改
 - **Qwen-VL 模型**：默认从 HuggingFace 下载，支持本地路径
+
+### 音频分段与缓存配置
+
+`AudioRetriever` 支持分段时长与缓存目录配置：
+
+- `chunk_seconds`：分段时长（秒），默认 300
+- `cache_dir`：转录缓存目录，默认 `../data/embeddings/audio_cache`
+
+示例：
+
+- `AudioRetriever(chunk_seconds=300, cache_dir="../data/embeddings/audio_cache")`
 
 ---
 
