@@ -2,12 +2,21 @@ import whisper
 import faiss
 import numpy as np
 import os
+import json
+import hashlib
 import torch
 import subprocess
 from sentence_transformers import SentenceTransformer
 
 class AudioRetriever:
-    def __init__(self, whisper_model_size="medium", use_fp16=True, use_fast_index=False):
+    def __init__(
+        self,
+        whisper_model_size="medium",
+        use_fp16=True,
+        use_fast_index=False,
+        chunk_seconds=300,
+        cache_dir="../data/embeddings/audio_cache",
+    ):
         """
         Args:
             whisper_model_size: "tiny", "base", "small", "medium", "large-v3"
@@ -28,11 +37,15 @@ class AudioRetriever:
         else:
             self.device = "cuda:0"  # 只有1个GPU时，使用GPU 0
         print(f"[Audio Init] Loading models on {self.device} (Total GPUs: {torch.cuda.device_count()})...")
+        self.whisper_model_size = whisper_model_size
         
         # 1. 加载 Whisper（可选择更小的模型）
         print(f"[Audio Init] Loading Whisper {whisper_model_size}...")
         self.whisper_model = whisper.load_model(whisper_model_size, device=self.device)
         self.use_fp16 = use_fp16 and torch.cuda.is_available()
+        self.chunk_seconds = chunk_seconds
+        self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True)
         
         # 2. 加载文本向量模型
         print("[Audio Init] Loading Sentence-Transformer...")
@@ -70,6 +83,135 @@ class AudioRetriever:
             print(f"[Audio Warning] PCM 转码失败: {e}")
             raise RuntimeError("ffmpeg 音频提取失败，请检查环境。")
     
+    def _get_audio_duration(self, audio_path):
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+        ]
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return float(result.stdout.strip())
+        except Exception:
+            return None
+
+    def _make_cache_path(self, video_path, language):
+        try:
+            stat = os.stat(video_path)
+            key_src = f"{video_path}|{stat.st_size}|{stat.st_mtime}|{self.whisper_model_size}|{language}|{self.chunk_seconds}"
+        except FileNotFoundError:
+            key_src = f"{video_path}|{self.whisper_model_size}|{language}|{self.chunk_seconds}"
+        cache_key = hashlib.md5(key_src.encode("utf-8")).hexdigest()
+        return os.path.join(self.cache_dir, f"{cache_key}.json")
+
+    def _load_cached_segments(self, cache_path):
+        if not os.path.exists(cache_path):
+            return None
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("segments", [])
+        except Exception:
+            return None
+
+    def _save_cached_segments(self, cache_path, segments):
+        payload = {
+            "segments": segments,
+        }
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _split_audio(self, audio_path, chunk_seconds):
+        chunk_dir = f"{audio_path}_chunks"
+        os.makedirs(chunk_dir, exist_ok=True)
+        chunk_pattern = os.path.join(chunk_dir, "chunk_%03d.wav")
+        cmd = [
+            "ffmpeg",
+            "-i",
+            audio_path,
+            "-f",
+            "segment",
+            "-segment_time",
+            str(chunk_seconds),
+            "-reset_timestamps",
+            "1",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            chunk_pattern,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+        ]
+        subprocess.run(cmd, check=True)
+        chunk_files = sorted(
+            [os.path.join(chunk_dir, f) for f in os.listdir(chunk_dir) if f.endswith(".wav")]
+        )
+        return chunk_dir, chunk_files
+
+    def _cleanup_chunks(self, chunk_dir):
+        try:
+            for name in os.listdir(chunk_dir):
+                path = os.path.join(chunk_dir, name)
+                if os.path.isfile(path):
+                    os.remove(path)
+            os.rmdir(chunk_dir)
+        except Exception:
+            pass
+
+    def _transcribe_full(self, audio_path, transcribe_options):
+        result = self.whisper_model.transcribe(audio_path, **transcribe_options)
+        segments = result.get("segments", [])
+        return [
+            {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
+            for seg in segments
+        ]
+
+    def _transcribe_chunked(self, audio_path, transcribe_options):
+        if not self.chunk_seconds:
+            return self._transcribe_full(audio_path, transcribe_options)
+
+        try:
+            chunk_dir, chunk_files = self._split_audio(audio_path, self.chunk_seconds)
+        except Exception as e:
+            print(f"[Audio Warning] 分段切割失败，回退为整段转录: {e}")
+            return self._transcribe_full(audio_path, transcribe_options)
+
+        segments = []
+        offset = 0.0
+        try:
+            for i, chunk_path in enumerate(chunk_files):
+                print(f"[Audio] Transcribing chunk {i+1}/{len(chunk_files)}...")
+                result = self.whisper_model.transcribe(chunk_path, **transcribe_options)
+                for seg in result.get("segments", []):
+                    segments.append(
+                        {
+                            "start": seg["start"] + offset,
+                            "end": seg["end"] + offset,
+                            "text": seg["text"],
+                        }
+                    )
+                duration = self._get_audio_duration(chunk_path)
+                if duration is None:
+                    duration = self.chunk_seconds
+                offset += duration
+        finally:
+            self._cleanup_chunks(chunk_dir)
+
+        return segments
+
     def process_audio(self, video_path, language=None):
         print(f"[Audio Processing] Start processing: {os.path.basename(video_path)}")
         
@@ -90,9 +232,12 @@ class AudioRetriever:
         }
         if language:
             transcribe_options["language"] = language
-        
-        result = self.whisper_model.transcribe(audio_path, **transcribe_options)
-        segments = result["segments"]
+
+        cache_path = self._make_cache_path(video_path, language)
+        segments = self._load_cached_segments(cache_path)
+        if segments is None:
+            segments = self._transcribe_chunked(audio_path, transcribe_options)
+            self._save_cached_segments(cache_path, segments)
         print(f"[Audio] Transcribed {len(segments)} segments.")
         
         if not segments:
