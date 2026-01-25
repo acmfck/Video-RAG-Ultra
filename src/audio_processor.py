@@ -17,8 +17,17 @@ class AudioRetriever:
             use_fp16: 使用半精度加速
             use_fast_index: 使用 HNSW 索引（大数据量时更快）
         """
-        self.device = "cuda:2" if torch.cuda.device_count() > 2 else "cuda:0"
-        print(f"[Audio Init] Loading models on {self.device}...")
+        # GPU分配策略：
+        # - 3+ GPU: 使用独立的GPU 2
+        # - 2 GPU: 使用GPU 0（与CLIP共享，Qwen-VL独占GPU 1）
+        # - 1 GPU: 使用GPU 0
+        if torch.cuda.device_count() >= 3:
+            self.device = "cuda:2"  # 3个或更多GPU时，使用独立的GPU 2
+        elif torch.cuda.device_count() >= 2:
+            self.device = "cuda:0"  # 2个GPU时，与CLIP共享GPU 0（Qwen-VL独占GPU 1）
+        else:
+            self.device = "cuda:0"  # 只有1个GPU时，使用GPU 0
+        print(f"[Audio Init] Loading models on {self.device} (Total GPUs: {torch.cuda.device_count()})...")
         
         # 1. 加载 Whisper（可选择更小的模型）
         print(f"[Audio Init] Loading Whisper {whisper_model_size}...")
