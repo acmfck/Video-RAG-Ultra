@@ -1,24 +1,38 @@
 import gradio as gr
 import os
 import traceback
+from dataclasses import dataclass
+
 from video_processor import VideoRetriever
 from vlm_handler import VLMHandler
 from audio_processor import AudioRetriever
 
-print("正在初始化 Web 系统 (这可能需要加载多个模型)...")
+@dataclass
+class AppServices:
+    vlm: VLMHandler
+    retriever: VideoRetriever
+    audio_retriever: AudioRetriever
 
-try:
-    vlm = VLMHandler()
-    retriever = VideoRetriever()
-    audio_retriever = AudioRetriever()
-except Exception as e:
-    print(f"模型加载出错: {e}")
-    raise 
 
-def process_upload(video_path):
+def init_services():
+    print("正在初始化 Web 系统 (这可能需要加载多个模型)...")
+    try:
+        return AppServices(
+            vlm=VLMHandler(),
+            retriever=VideoRetriever(),
+            audio_retriever=AudioRetriever(),
+        )
+    except Exception as e:
+        print(f"模型加载出错: {e}")
+        raise
+
+
+def process_upload_impl(video_path, services: AppServices):
     """Process video: visual and audio indexing"""
-    if video_path is None: return "请上传视频", None
-    
+    if video_path is None:
+        yield "请上传视频", None
+        return
+
     loading_html = (
         f"<div class='loading-pane'>"
         f"<div class='spinner'></div>"
@@ -27,9 +41,9 @@ def process_upload(video_path):
         f"</div>"
     )
     yield loading_html, None
-    
+
     try:
-        retriever.process_video(video_path, max_duration_minutes=None)
+        services.retriever.process_video(video_path, max_duration_minutes=None)
         loading_html = (
             f"<div class='loading-pane'>"
             f"<div class='spinner'></div>"
@@ -38,7 +52,7 @@ def process_upload(video_path):
             f"</div>"
         )
         yield loading_html, None
-        audio_retriever.process_audio(video_path)
+        services.audio_retriever.process_audio(video_path)
         stats = (
             f"<div class='success-pane'>"
             f"<div class='success-header'>"
@@ -46,8 +60,8 @@ def process_upload(video_path):
             f"<span class='success-title'>索引构建完成！</span>"
             f"</div>"
             f"<div class='stats-grid'>"
-            f"<div class='stat-item'><span class='stat-label'>视觉关键帧</span><span class='stat-value'>{retriever.index.ntotal}</span><span class='stat-unit'>帧</span></div>"
-            f"<div class='stat-item'><span class='stat-label'>音频片段</span><span class='stat-value'>{audio_retriever.index.ntotal}</span><span class='stat-unit'>条</span></div>"
+            f"<div class='stat-item'><span class='stat-label'>视觉关键帧</span><span class='stat-value'>{services.retriever.index.ntotal}</span><span class='stat-unit'>帧</span></div>"
+            f"<div class='stat-item'><span class='stat-label'>音频片段</span><span class='stat-value'>{services.audio_retriever.index.ntotal}</span><span class='stat-unit'>条</span></div>"
             f"</div>"
             f"<div class='ready-badge'><span class='ready-icon'>✨</span> Ready to Chat!</div>"
             f"</div>"
@@ -57,15 +71,16 @@ def process_upload(video_path):
         traceback.print_exc()
         yield f"<div class='error-pane'><span class='error-icon'>❌</span> 处理失败: <code>{str(e)}</code></div>", None
 
-def chat_engine(query, history):
+
+def chat_engine_impl(query, services: AppServices):
     """Core Q&A logic with multimodal retrieval"""
-    if retriever.index.ntotal == 0:
+    if services.retriever.index.ntotal == 0:
         return "<div class='warn-pane'>⚠️ 请先在左侧上传视频并点击 [构建索引]</div>", []
-    print(f"[App] Visual Search...")
-    visual_results = retriever.search(query, k=6)
-    print(f"[App] Audio Search...")
-    audio_results = audio_retriever.search(query, k=6)
-    
+    print("[App] Visual Search...")
+    visual_results = services.retriever.search(query, k=6)
+    print("[App] Audio Search...")
+    audio_results = services.audio_retriever.search(query, k=6)
+
     gallery_data, images_info = [], []
     rag_evidence = (
         "<div class='rag-evidence-container'>"
@@ -99,7 +114,7 @@ def chat_engine(query, history):
             f"</li>"
         )
     rag_evidence += "</ul></div></div>"
-    answer = vlm.chat(query, images_info, audio_results)
+    answer = services.vlm.chat(query, images_info, audio_results)
     final_response = (
         f"{rag_evidence}<div class='divider'></div>"
         f"<div class='ai-answer-title'>🤖 AI 分析结果</div>"
@@ -779,125 +794,138 @@ theme = gr.themes.Soft(
     radius_size="lg"
 )
 
-with gr.Blocks(title="Video-RAG Ultra | 多模态视频理解系统") as demo:
-    with gr.Column(elem_classes="container"):
-        with gr.Column(elem_classes="header-text"):
-            gr.Markdown(
-                "<h1>⚡️ Video-RAG Ultra</h1>", 
-                elem_id="main-title"
-            )
-            gr.Markdown(
-                "<p style='margin-top: 0.5rem;'>让 AI 成为你的视频大脑</p>"
-                "<p style='font-size: 1.1em; margin-top: 0.25rem;'>"
-                "<span style='color:#a78bfa; font-weight: 600;'>超长视频理解 · 视觉 + 音频 检索增强生成 (RAG)</span>"
-                "</p>",
-                elem_id="subtitle"
-            )
-        with gr.Row(equal_height=False):
-            with gr.Column(scale=3, elem_classes="sidebar-card"):
-                gr.Markdown(
-                    "### 🎛️ 控制中心",
-                    elem_classes="section-title"
-                )
-                video_in = gr.Video(
-                    label="🌟 上传视频", 
-                    sources=["upload"], 
-                    height=260, 
-                    interactive=True
-                )
-                btn_process = gr.Button(
-                    "🚀 构建索引", 
-                    variant="primary", 
-                    elem_classes="primary-btn",
-                    scale=1
-                )
-                gr.Markdown("---")
-                gr.Markdown(
-                    "#### 📊 系统状态",
-                    elem_classes="section-title"
-                )
-                status_display = gr.Markdown(
-                    "<div style='text-align: center; padding: 1rem; color: #64748b;'>"
-                    "⏸️ 等待视频上传...</div>", 
-                    elem_id="status-markdown"
-                )
-                with gr.Accordion(
-                    "🖼️ 检索关键帧画廊", 
-                    open=False,
-                    elem_classes="gallery-accordion"
-                ):
-                    gallery = gr.Gallery(
-                        label="Visual Evidence", 
-                        columns=3, 
-                        height=360, 
-                        show_label=False
-                    )
-            with gr.Column(scale=7):
-                chatbot = gr.Chatbot(
-                    label="💬 Qwen-VL-Chat (Audio-Enhanced)",
-                    elem_id="chatbot",
-                    height=700,
-                    avatar_images=("👤", "🤖"),
-                )
-                with gr.Row():
-                    msg = gr.Textbox(
-                        show_label=False, 
-                        placeholder="💡 请输入关于视频的提问，例如：'老师讲了哪三个核心概念？' 或 '视频中出现了哪些场景？'", 
-                        scale=9,
-                        container=False,
-                        autofocus=True,
-                        lines=2
-                    )
-                    btn_send = gr.Button(
-                        "发送 ✨", 
-                        variant="primary", 
-                        scale=1, 
-                        elem_classes="primary-btn",
-                        size="lg"
-                    )
-                with gr.Row():
-                    btn_clear = gr.Button(
-                        "🗑️ 清空历史", 
-                        size="sm", 
-                        variant="secondary",
-                        scale=1
-                    )
-                    gr.Markdown(
-                        "<div style='text-align: right;'>"
-                        "<span style='font-weight: 600; color: #a78bfa;'>"
-                        "🚀 <b>Powered by</b> 多卡 RTX 3090 | Qwen-VL | Whisper-v3"
-                        "</span></div>",
-                        elem_classes="footer-text",
-                    )
-    btn_process.click(process_upload, [video_in], [status_display, gallery])
-    def user_msg(user_message, history):
-        return "", history + [{"role": "user", "content": user_message}]
-    def bot_msg(history):
-        if len(history) > 0:
-            raw_query = history[-1]["content"]
-            query = raw_query
-            if isinstance(raw_query, list):
-                for item in raw_query:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        query = item["text"]
-                        break
-        else:
-            query = ""
-        response, images = chat_engine(query, history)
+
+def extract_query(history):
+    if len(history) == 0:
+        return ""
+    raw_query = history[-1]["content"]
+    if isinstance(raw_query, list):
+        for item in raw_query:
+            if isinstance(item, dict) and item.get("type") == "text":
+                return item["text"]
+    return raw_query
+
+
+def build_ui(services: AppServices):
+    def _process_upload(video_path):
+        yield from process_upload_impl(video_path, services)
+
+    def _bot_msg(history):
+        query = extract_query(history)
+        response, images = chat_engine_impl(query, services)
         history.append({"role": "assistant", "content": response})
         return history, images
-    msg.submit(user_msg, [msg, chatbot], [msg, chatbot], queue=False).then(
-        bot_msg, [chatbot], [chatbot, gallery]
-    )
-    btn_send.click(user_msg, [msg, chatbot], [msg, chatbot], queue=False).then(
-        bot_msg, [chatbot], [chatbot, gallery]
-    )
-    btn_clear.click(lambda: [], None, chatbot, queue=False)
+
+    def _user_msg(user_message, history):
+        return "", history + [{"role": "user", "content": user_message}]
+
+    with gr.Blocks(title="Video-RAG Ultra | 多模态视频理解系统") as demo:
+        with gr.Column(elem_classes="container"):
+            with gr.Column(elem_classes="header-text"):
+                gr.Markdown(
+                    "<h1>⚡️ Video-RAG Ultra</h1>",
+                    elem_id="main-title"
+                )
+                gr.Markdown(
+                    "<p style='margin-top: 0.5rem;'>让 AI 成为你的视频大脑</p>"
+                    "<p style='font-size: 1.1em; margin-top: 0.25rem;'>"
+                    "<span style='color:#a78bfa; font-weight: 600;'>超长视频理解 · 视觉 + 音频 检索增强生成 (RAG)</span>"
+                    "</p>",
+                    elem_id="subtitle"
+                )
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=3, elem_classes="sidebar-card"):
+                    gr.Markdown(
+                        "### 🎛️ 控制中心",
+                        elem_classes="section-title"
+                    )
+                    video_in = gr.Video(
+                        label="🌟 上传视频",
+                        sources=["upload"],
+                        height=260,
+                        interactive=True
+                    )
+                    btn_process = gr.Button(
+                        "🚀 构建索引",
+                        variant="primary",
+                        elem_classes="primary-btn",
+                        scale=1
+                    )
+                    gr.Markdown("---")
+                    gr.Markdown(
+                        "#### 📊 系统状态",
+                        elem_classes="section-title"
+                    )
+                    status_display = gr.Markdown(
+                        "<div style='text-align: center; padding: 1rem; color: #64748b;'>"
+                        "⏸️ 等待视频上传...</div>",
+                        elem_id="status-markdown"
+                    )
+                    with gr.Accordion(
+                        "🖼️ 检索关键帧画廊",
+                        open=False,
+                        elem_classes="gallery-accordion"
+                    ):
+                        gallery = gr.Gallery(
+                            label="Visual Evidence",
+                            columns=3,
+                            height=360,
+                            show_label=False
+                        )
+                with gr.Column(scale=7):
+                    chatbot = gr.Chatbot(
+                        label="💬 Qwen-VL-Chat (Audio-Enhanced)",
+                        elem_id="chatbot",
+                        height=700,
+                        avatar_images=("👤", "🤖"),
+                    )
+                    with gr.Row():
+                        msg = gr.Textbox(
+                            show_label=False,
+                            placeholder="💡 请输入关于视频的提问，例如：'老师讲了哪三个核心概念？' 或 '视频中出现了哪些场景？'",
+                            scale=9,
+                            container=False,
+                            autofocus=True,
+                            lines=2
+                        )
+                        btn_send = gr.Button(
+                            "发送 ✨",
+                            variant="primary",
+                            scale=1,
+                            elem_classes="primary-btn",
+                            size="lg"
+                        )
+                    with gr.Row():
+                        btn_clear = gr.Button(
+                            "🗑️ 清空历史",
+                            size="sm",
+                            variant="secondary",
+                            scale=1
+                        )
+                        gr.Markdown(
+                            "<div style='text-align: right;'>"
+                            "<span style='font-weight: 600; color: #a78bfa;'>"
+                            "🚀 <b>Powered by</b> 多卡 RTX 3090 | Qwen-VL | Whisper-v3"
+                            "</span></div>",
+                            elem_classes="footer-text",
+                        )
+        btn_process.click(_process_upload, [video_in], [status_display, gallery])
+        msg.submit(_user_msg, [msg, chatbot], [msg, chatbot], queue=False).then(
+            _bot_msg, [chatbot], [chatbot, gallery]
+        )
+        btn_send.click(_user_msg, [msg, chatbot], [msg, chatbot], queue=False).then(
+            _bot_msg, [chatbot], [chatbot, gallery]
+        )
+        btn_clear.click(lambda: [], None, chatbot, queue=False)
+
+    return demo
 
 if __name__ == "__main__":
+    services = init_services()
+    demo = build_ui(services)
     demo.queue().launch(
-        server_name="0.0.0.0", 
-        server_port=7860, 
+        server_name="0.0.0.0",
+        server_port=7860,
         share=True,
         theme=theme,
         css=custom_css
