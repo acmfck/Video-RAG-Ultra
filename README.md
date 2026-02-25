@@ -70,43 +70,88 @@ Video-RAG Ultra 是一个基于 RAG (Retrieval-Augmented Generation) 技术的�
 - ffmpeg (用于视频/音频处理)
 - 至少 3 张 GPU (推荐 RTX 3090 或更高)
 
-### 1. 安装依赖
+### 1. 创建 Conda 环境（推荐）
 
 ```bash
 # 克隆项目
 git clone <repository-url>
 cd Video-RAG-Ultra
 
-# 安装 Python 依赖
-pip install -r requirements.txt
+# 创建并激活 Conda 环境
+conda create -n video-rag-ultra python=3.10 -y
+conda activate video-rag-ultra
 
-# 安装额外依赖（如果 requirements.txt 中未包含）
-pip install openai-whisper sentence-transformers
+# 如遇 defaults 源网络问题，可改用 conda-forge
+# conda create -n video-rag-ultra python=3.10 -y -c conda-forge --override-channels
+
+# 基础构建工具
+python -m pip install -U pip setuptools wheel
 ```
 
-**注意**：如果使用 HuggingFace 镜像，建议设置环境变量：
+### 2. 安装项目依赖
 
 ```bash
+# 安装 PyTorch（GPU，CUDA 12.1）
+conda install -y pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+
+# 安装其余依赖（跳过 requirements.txt 中的 CLIP Git 依赖）
+grep -v 'openai/CLIP.git' requirements.txt > /tmp/requirements.no_clip.txt
+pip install -r /tmp/requirements.no_clip.txt
+
+# 与 Qwen-VL-Chat 兼容版本（见 src/vlm_handler.py）
+pip install "transformers==4.37.2"
+```
+
+### 3. 安装 CLIP（在线/离线二选一）
+
+```bash
+# 在线安装（网络可访问 GitHub 时）
+pip install git+https://github.com/openai/CLIP.git
+```
+
+```bash
+# 离线安装（已下载源码到 ./CLIP-main）
+conda install -y "setuptools<81" wheel
+pip install --no-build-isolation -e ./CLIP-main
+```
+
+### 4. 设置环境变量（可选）
+
+```bash
+# 若出现 Connection reset by peer，可先清除代理配置
+# unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+
+# HuggingFace 镜像（国内推荐）
 export HF_ENDPOINT=https://hf-mirror.com
+
+# 可见 GPU（按机器实际情况设置）
+export CUDA_VISIBLE_DEVICES=0,1,2
 ```
 
-### 2. 验证环境
+### 5. 验证环境
 
 ```bash
+# 检查 CUDA
+python -c "import torch; print('CUDA:', torch.cuda.is_available(), 'GPUs:', torch.cuda.device_count())"
+
 # 验证 CLIP 环境
 python src/clip_demo.py
+
+# 验证关键依赖
+python -c "import clip, whisper, faiss, transformers, gradio; print('All dependencies OK')"
 ```
 
-### 3. 启动应用
+### 6. 启动应用
 
 ```bash
-cd src
-HF_ENDPOINT=https://hf-mirror.com python3 app.py
+HF_ENDPOINT=https://hf-mirror.com python src/app.py
 ```
 
 应用将在 `http://0.0.0.0:7860` 启动，Gradio 会自动生成公网链接。
 
-### 4. 使用流程
+**GPU 注意**：当前代码在 `src/vlm_handler.py` 中将 VLM 固定为 `cuda:1`，建议至少使用 2 张可见 GPU。单卡环境请将 `device_map="cuda:1"` 改为 `device_map="cuda:0"`。
+
+### 7. 使用流程
 
 1. **上传视频**：在左侧控制面板上传视频文件
 2. **构建索引**：点击"🚀 构建索引"按钮，系统将自动：
