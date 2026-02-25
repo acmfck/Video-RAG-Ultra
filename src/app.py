@@ -923,9 +923,16 @@ def build_ui(services: AppServices):
 if __name__ == "__main__":
     services = init_services()
     demo = build_ui(services)
+    port_env = os.getenv("GRADIO_SERVER_PORT")
+    try:
+        server_port = int(port_env) if port_env else 7860
+    except ValueError:
+        print(f"[Warning] Invalid GRADIO_SERVER_PORT={port_env}, fallback to 7860")
+        server_port = 7860
+
     demo.queue().launch(
         server_name="0.0.0.0",
-        server_port=7860,
+        server_port=server_port,
         share=True,
         theme=theme,
         css=custom_css
