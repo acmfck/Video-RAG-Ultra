@@ -18,7 +18,7 @@ Video-RAG/
 │   ├── app.py                # Gradio Web 应用主程序
 │   ├── video_processor.py    # 视频关键帧提取与检索
 │   ├── audio_processor.py    # 音频转录与检索
-│   ├── vlm_handler.py        # Qwen-VL 模型处理
+│   ├── vlm_handler.py        # Qwen2.5-VL 模型处理
 │   ├── clip_demo.py          # CLIP 环境验证脚本
 │   ├── video_retriever.py    # 视频检索演示（可选）
 │   ├── keyframes/            # 关键帧存储（运行时生成）
@@ -46,7 +46,7 @@ Video-RAG/
 - ✅ `src/app.py` - 主应用程序（Gradio Web 界面）
 - ✅ `src/video_processor.py` - 视频处理模块
 - ✅ `src/audio_processor.py` - 音频处理模块
-- ✅ `src/vlm_handler.py` - 视觉语言模型处理
+- ✅ `src/vlm_handler.py` - Qwen2.5-VL 视觉语言模型处理
 - ✅ `src/clip_demo.py` - CLIP 验证脚本
 - ✅ `src/__init__.py` - Python 包初始化
 

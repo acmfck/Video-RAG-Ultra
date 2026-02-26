@@ -18,7 +18,7 @@
 
 ## 📖 项目介绍
 
-Video-RAG Ultra 是一个基于 RAG (Retrieval-Augmented Generation) 技术的长视频问答系统。它通过**视觉关键帧检索**和**音频语义检索**的双模态索引，结合 **Qwen-VL** 视觉语言模型，实现对超长视频内容的智能问答。
+Video-RAG Ultra 是一个基于 RAG (Retrieval-Augmented Generation) 技术的长视频问答系统。它通过**视觉关键帧检索**和**音频语义检索**的双模态索引，结合 **Qwen2.5-VL** 视觉语言模型，实现对超长视频内容的智能问答。
 
 ### 核心能力
 
@@ -98,8 +98,8 @@ conda install -y pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
 grep -v 'openai/CLIP.git' requirements.txt > /tmp/requirements.no_clip.txt
 pip install -r /tmp/requirements.no_clip.txt
 
-# 与 Qwen-VL-Chat 兼容版本（见 src/vlm_handler.py）
-pip install "transformers==4.37.2"
+# Qwen2.5-VL 需要较新版本（见 src/vlm_handler.py）
+pip install "transformers>=4.49.0,<5.0.0"
 ```
 
 ### 3. 安装 CLIP（在线/离线二选一）
@@ -149,7 +149,7 @@ HF_ENDPOINT=https://hf-mirror.com python src/app.py
 
 应用将在 `http://0.0.0.0:7860` 启动，Gradio 会自动生成公网链接。
 
-**GPU 注意**：当前代码在 `src/vlm_handler.py` 中将 VLM 固定为 `cuda:1`，建议至少使用 2 张可见 GPU。单卡环境请将 `device_map="cuda:1"` 改为 `device_map="cuda:0"`。
+**GPU 注意**：当前代码默认优先使用 `cuda:1`（可通过 `VLM_DEVICE` 覆盖），建议至少使用 2 张可见 GPU。单卡环境可设置 `VLM_DEVICE=cuda:0`。
 
 ### 7. 使用流程
 
@@ -231,7 +231,7 @@ HF_ENDPOINT=https://hf-mirror.com python src/app.py
 │              └──────────┬───────┘                               │
 │                         ▼                                       │
 │        ┌──────────────────────────────────────┐                │
-│        │        Qwen-VL-Chat (VLM)              │                │
+│        │     Qwen2.5-VL-7B-Instruct (VLM)       │                │
 │        │  多模态证据融合 + 推理 + 答案生成       │                │
 │        └──────────┬───────────────────────────┘                │
 │                   ▼                                              │
@@ -253,14 +253,14 @@ HF_ENDPOINT=https://hf-mirror.com python src/app.py
 | **音频转录**     | Whisper large-v3     | OpenAI Whisper 模型，高精度语音识别   |
 | **文本编码**     | Sentence-Transformer | all-MiniLM-L6-v2，384维向量           |
 | **向量检索**     | FAISS                | Facebook AI Similarity Search，L2距离 |
-| **视觉语言模型** | Qwen-VL-Chat         | 阿里通义千问视觉语言模型              |
+| **视觉语言模型** | Qwen2.5-VL-7B-Instruct | 阿里通义千问视觉语言模型            |
 | **Web框架**      | Gradio               | 快速构建交互式界面                    |
 | **视频处理**     | OpenCV + FFmpeg      | 关键帧提取、音频提取                  |
 
 ### GPU 分配策略
 
 - **GPU 0 (cuda:0)**：CLIP 模型（视觉编码）
-- **GPU 1 (cuda:1)**：Qwen-VL-Chat（视觉语言模型）
+- **GPU 1 (cuda:1)**：Qwen2.5-VL（视觉语言模型）
 - **GPU 2 (cuda:2)**：Whisper + Sentence-Transformer（音频处理）
 
 ---
@@ -298,7 +298,7 @@ Video-RAG/
 │   ├── app.py                 # Gradio Web 应用主程序
 │   ├── video_processor.py     # 视频关键帧提取与检索
 │   ├── audio_processor.py     # 音频转录与检索
-│   ├── vlm_handler.py         # Qwen-VL 模型处理
+│   ├── vlm_handler.py         # Qwen2.5-VL 模型处理
 │   ├── clip_demo.py           # CLIP 环境验证脚本
 │   └── keyframes/             # 关键帧存储目录
 ├── data/
@@ -328,7 +328,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2
 
 - **CLIP 模型**：默认使用 `ViT-B/32`，可在 `VideoRetriever` 初始化时修改
 - **Whisper 模型**：默认使用 `medium`，可在 `AudioRetriever` 中修改
-- **Qwen-VL 模型**：默认从 HuggingFace 下载，支持本地路径
+- **Qwen2.5-VL 模型**：默认从 HuggingFace 下载，支持本地路径
 
 ### 音频分段与缓存配置
 
@@ -353,7 +353,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2
 - [x] CLIP 向量化与 FAISS 索引
 - [x] Whisper 音频转录
 - [x] 文本语义检索
-- [x] Qwen-VL 模型集成
+- [x] Qwen2.5-VL 模型集成
 - [x] 多模态 RAG 问答
 - [x] Gradio Web 界面开发
 - [x] 多GPU 部署优化
@@ -385,7 +385,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2
 
 - [OpenAI CLIP](https://github.com/openai/CLIP) - 视觉编码模型
 - [OpenAI Whisper](https://github.com/openai/whisper) - 语音识别模型
-- [Qwen-VL](https://github.com/QwenLM/Qwen-VL) - 视觉语言模型
+- [Qwen2.5-VL](https://github.com/QwenLM/Qwen2.5-VL) - 视觉语言模型
 - [Gradio](https://github.com/gradio-app/gradio) - Web 界面框架
 - [FAISS](https://github.com/facebookresearch/faiss) - 向量检索库
 
