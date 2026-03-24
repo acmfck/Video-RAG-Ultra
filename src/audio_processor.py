@@ -28,12 +28,12 @@ class AudioRetriever:
         """
         # GPU分配策略：
         # - 3+ GPU: 使用独立的GPU 2
-        # - 2 GPU: 使用GPU 0（与CLIP共享，Qwen-VL独占GPU 1）
+        # - 2 GPU: 使用GPU 0（与CLIP共享，Qwen2.5-VL独占GPU 1）
         # - 1 GPU: 使用GPU 0
         if torch.cuda.device_count() >= 3:
             self.device = "cuda:2"  # 3个或更多GPU时，使用独立的GPU 2
         elif torch.cuda.device_count() >= 2:
-            self.device = "cuda:0"  # 2个GPU时，与CLIP共享GPU 0（Qwen-VL独占GPU 1）
+            self.device = "cuda:0"  # 2个GPU时，与CLIP共享GPU 0（Qwen2.5-VL独占GPU 1）
         else:
             self.device = "cuda:0"  # 只有1个GPU时，使用GPU 0
         print(f"[Audio Init] Loading models on {self.device} (Total GPUs: {torch.cuda.device_count()})...")
@@ -293,3 +293,88 @@ class AudioRetriever:
                 results.append((data['start'], data['text'], score))
         
         return results
+
+    def get_subtitles_for_timestamps(
+        self,
+        timestamps: list,
+        window_seconds: float = 3.0
+    ) -> list:
+        """
+        Get subtitle/transcript text for given frame timestamps.
+        
+        This method is used for Video-MME benchmark evaluation where
+        we need to align subtitles with sampled frames.
+        
+        Args:
+            timestamps: List of frame timestamps in seconds
+            window_seconds: Time window to search around each timestamp
+            
+        Returns:
+            List of (timestamp, subtitle_text) tuples
+        """
+        if not self.metadata:
+            return [(ts, "") for ts in timestamps]
+        
+        results = []
+        
+        for ts in timestamps:
+            matching_texts = []
+            
+            for idx, data in self.metadata.items():
+                seg_start = data["start"]
+                seg_end = data["end"]
+                
+                # Check if timestamp falls within segment window
+                if seg_start - window_seconds <= ts <= seg_end + window_seconds:
+                    matching_texts.append(data["text"])
+            
+            combined_text = " ".join(matching_texts) if matching_texts else ""
+            results.append((ts, combined_text))
+        
+        return results
+
+    def get_all_transcripts(self) -> list:
+        """
+        Get all transcripts as a list of segments.
+        
+        Returns:
+            List of dict with keys: start, end, text
+        """
+        if not self.metadata:
+            return []
+        
+        segments = []
+        for idx in sorted(self.metadata.keys()):
+            segments.append(self.metadata[idx])
+        
+        return segments
+
+    def format_subtitles_for_prompt(
+        self,
+        timestamps: list = None,
+        max_chars: int = 2000
+    ) -> str:
+        """
+        Format subtitles for inclusion in VLM prompt.
+        
+        Args:
+            timestamps: If provided, only include subtitles near these timestamps
+            max_chars: Maximum character limit for output
+            
+        Returns:
+            Formatted subtitle string
+        """
+        if timestamps:
+            subs = self.get_subtitles_for_timestamps(timestamps)
+            texts = [text for _, text in subs if text]
+        else:
+            segments = self.get_all_transcripts()
+            texts = [seg["text"] for seg in segments]
+        
+        combined = " ".join(texts)
+        
+        # Truncate if too long
+        if len(combined) > max_chars:
+            combined = combined[:max_chars] + "..."
+        
+        return combined

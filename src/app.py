@@ -17,11 +17,14 @@ class AppServices:
 def init_services():
     print("正在初始化 Web 系统 (这可能需要加载多个模型)...")
     try:
-        return AppServices(
+        services = AppServices(
             vlm=VLMHandler(),
             retriever=VideoRetriever(),
             audio_retriever=AudioRetriever(),
         )
+        if not services.vlm.available:
+            print("[Init Warning] VLM is unavailable. Retrieval UI is usable, but final answer generation will be degraded.")
+        return services
     except Exception as e:
         print(f"模型加载出错: {e}")
         raise
@@ -344,6 +347,9 @@ input, textarea, .gradio-textbox textarea {
     border-radius: 16px !important;
     border: 2px solid rgba(139, 92, 246, 0.3) !important;
     background: rgba(246, 248, 255, 0.95) !important;
+    color: #1e293b !important;
+    caret-color: #4f46e5 !important;
+    -webkit-text-fill-color: #1e293b !important;
     font-size: 1.05em !important;
     padding: 0.875rem 1.25rem !important;
     transition: all 0.3s ease;
@@ -352,6 +358,36 @@ input:focus, textarea:focus, .gradio-textbox textarea:focus {
     border-color: rgba(139, 92, 246, 0.6) !important;
     box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.1) !important;
     background: rgba(255, 255, 255, 1) !important;
+}
+input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder {
+    color: #64748b !important;
+    opacity: 0.9 !important;
+    -webkit-text-fill-color: #64748b !important;
+}
+#chat-input textarea,
+#chat-input input,
+.dark #chat-input textarea,
+.dark #chat-input input {
+    background: rgba(246, 248, 255, 0.98) !important;
+    color: #0f172a !important;
+    caret-color: #4f46e5 !important;
+    -webkit-text-fill-color: #0f172a !important;
+}
+#chat-input textarea::placeholder,
+#chat-input input::placeholder,
+.dark #chat-input textarea::placeholder,
+.dark #chat-input input::placeholder {
+    color: #64748b !important;
+    opacity: 0.95 !important;
+    -webkit-text-fill-color: #64748b !important;
+}
+#chat-input textarea:focus,
+#chat-input input:focus,
+.dark #chat-input textarea:focus,
+.dark #chat-input input:focus {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    -webkit-text-fill-color: #0f172a !important;
 }
 .footer-text {
     color: #a78bfa;
@@ -874,7 +910,7 @@ def build_ui(services: AppServices):
                         )
                 with gr.Column(scale=7):
                     chatbot = gr.Chatbot(
-                        label="💬 Qwen-VL-Chat (Audio-Enhanced)",
+                        label="💬 Qwen2.5-VL (Audio-Enhanced)",
                         elem_id="chatbot",
                         height=700,
                         avatar_images=("👤", "🤖"),
@@ -885,6 +921,7 @@ def build_ui(services: AppServices):
                             placeholder="💡 请输入关于视频的提问，例如：'老师讲了哪三个核心概念？' 或 '视频中出现了哪些场景？'",
                             scale=9,
                             container=False,
+                            elem_id="chat-input",
                             autofocus=True,
                             lines=2
                         )
@@ -905,7 +942,7 @@ def build_ui(services: AppServices):
                         gr.Markdown(
                             "<div style='text-align: right;'>"
                             "<span style='font-weight: 600; color: #a78bfa;'>"
-                            "🚀 <b>Powered by</b> 多卡 RTX 3090 | Qwen-VL | Whisper-v3"
+                            "🚀 <b>Powered by</b> 多卡 RTX 3090 | Qwen2.5-VL | Whisper-v3"
                             "</span></div>",
                             elem_classes="footer-text",
                         )
@@ -924,16 +961,25 @@ if __name__ == "__main__":
     services = init_services()
     demo = build_ui(services)
     port_env = os.getenv("GRADIO_SERVER_PORT")
+    share_env = os.getenv("GRADIO_SHARE", "").strip().lower()
     try:
         server_port = int(port_env) if port_env else 7860
     except ValueError:
         print(f"[Warning] Invalid GRADIO_SERVER_PORT={port_env}, fallback to 7860")
         server_port = 7860
 
+    if share_env in {"", "0", "false", "no", "off"}:
+        share = False
+    elif share_env in {"1", "true", "yes", "on"}:
+        share = True
+    else:
+        print(f"[Warning] Invalid GRADIO_SHARE={share_env}, fallback to False")
+        share = False
+
     demo.queue().launch(
         server_name="0.0.0.0",
         server_port=server_port,
-        share=True,
+        share=share,
         theme=theme,
         css=custom_css
     )
