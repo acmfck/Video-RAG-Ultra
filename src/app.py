@@ -823,12 +823,24 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
 }
 """
 
-theme = gr.themes.Soft(
+theme = gr.themes.Glass(
     primary_hue="blue",
-    secondary_hue="purple",
+    secondary_hue="indigo",
     spacing_size="md",
     radius_size="lg"
 )
+
+default_light_head = """
+<script>
+(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("__theme")) {
+        url.searchParams.set("__theme", "light");
+        window.location.replace(url.toString());
+    }
+})();
+</script>
+"""
 
 
 def extract_query(history):
@@ -855,7 +867,10 @@ def build_ui(services: AppServices):
     def _user_msg(user_message, history):
         return "", history + [{"role": "user", "content": user_message}]
 
-    with gr.Blocks(title="Video-RAG Ultra | 多模态视频理解系统") as demo:
+    with gr.Blocks(
+        title="Video-RAG Ultra | 多模态视频理解系统",
+        head=default_light_head,
+    ) as demo:
         with gr.Column(elem_classes="container"):
             with gr.Column(elem_classes="header-text"):
                 gr.Markdown(

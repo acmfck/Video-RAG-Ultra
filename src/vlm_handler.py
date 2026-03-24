@@ -1,4 +1,5 @@
 import os
+import re
 import time
 
 import torch
@@ -88,6 +89,40 @@ class VLMHandler:
         if not self.available:
             print("[Error] Qwen2.5-VL is unavailable after retries.")
             print("Please check network/HF mirror and transformers version (recommended: >=4.49.0).")
+
+    @staticmethod
+    def _detect_query_language(query: str) -> str:
+        """Detect the dominant language in the user query."""
+        if not query:
+            return "unknown"
+
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", query))
+        latin_count = len(re.findall(r"[A-Za-z]", query))
+
+        if cjk_count > 0 and cjk_count >= latin_count:
+            return "zh"
+        if latin_count > 0:
+            return "en"
+        return "unknown"
+
+    def _build_language_instruction(self, query: str) -> str:
+        """Build a strong output-language constraint for the prompt."""
+        detected_lang = self._detect_query_language(query)
+
+        if detected_lang == "zh":
+            return (
+                "Output Language: Simplified Chinese.\n"
+                "You must answer in Simplified Chinese unless the user explicitly asks for another language.\n"
+            )
+        if detected_lang == "en":
+            return (
+                "Output Language: English.\n"
+                "You must answer in English unless the user explicitly asks for another language.\n"
+            )
+        return (
+            "Output Language: Match the user's query language.\n"
+            "Do not switch languages unless the user explicitly asks for another language.\n"
+        )
 
     def _init_absorption_layer(self):
         """初始化 AbsorptionLayer 和 VisualFeatureExtractor。"""
@@ -281,7 +316,9 @@ class VLMHandler:
                 m, s = divmod(int(ts), 60)
                 audio_context += f"- At {m:02d}:{s:02d}: \"{text}\"\n"
 
+        language_instruction = self._build_language_instruction(query)
         prompt_instruction = (
+            f"{language_instruction}\n"
             f"{visual_context}"
             f"{audio_context}\n"
             f"User Query: {query}\n\n"
@@ -289,7 +326,9 @@ class VLMHandler:
             "1. **Synthesize**: Combine the visual slides (OCR) and the teacher's speech to answer.\n"
             "2. **List Extraction**: If the user asks for a list (e.g., universities), extract unique names from the slides/audio. **Do not repeat names.**\n"
             "3. **Priority**: If the visual text is blurry, RELY on the Audio Transcript.\n"
-            "4. **Concise**: Give a direct and summarized answer."
+            "4. **Concise**: Give a direct and summarized answer.\n"
+            "5. **Language**: Follow the required output language above. "
+            "Do not switch to another language unless the user explicitly requests it."
         )
 
         print("[VLM] Fusion prompt constructed. Sending to model...")
