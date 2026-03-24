@@ -17,6 +17,9 @@
 ---
 
 ## 📖 项目介绍
+![video rag ultra](https://github.com/user-attachments/assets/fc29c985-d9c1-4cad-9d76-6713a65a0616)
+
+
 
 Video-RAG Ultra 是一个基于 RAG (Retrieval-Augmented Generation) 技术的长视频问答系统。它通过**视觉关键帧检索**和**音频语义检索**的双模态索引，结合 **Qwen2.5-VL** 视觉语言模型，实现对超长视频内容的智能问答。
 
