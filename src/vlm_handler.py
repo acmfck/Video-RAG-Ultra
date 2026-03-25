@@ -11,8 +11,12 @@ try:
 except ImportError:
     Qwen2_5_VLForConditionalGeneration = None
 
-from absorption_layer import AbsorptionLayer, build_absorption_config
-from visual_feature_extractor import VisualFeatureExtractor
+try:
+    from absorption_layer import AbsorptionLayer, build_absorption_config
+    from visual_feature_extractor import VisualFeatureExtractor
+except ImportError:
+    from src.absorption_layer import AbsorptionLayer, build_absorption_config
+    from src.visual_feature_extractor import VisualFeatureExtractor
 
 
 class VLMHandler:

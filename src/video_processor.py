@@ -72,13 +72,47 @@ class VideoRetriever:
             output_path, "-y", "-hide_banner", "-loglevel", "error"
         ]
         try:
-            subprocess.run(cmd, check=True)
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             if os.path.exists(output_path):
                 print("[Auto-Fix] 转码成功！")
                 return output_path
+            stderr_text = (result.stderr or "").strip()
+            if stderr_text:
+                print("[Auto-Fix] 转码完成，但 ffmpeg 返回了额外日志。")
+        except subprocess.CalledProcessError as e:
+            print("[Error] 转码失败。")
+            stderr_text = (e.stderr or "").strip()
+            if stderr_text:
+                print(stderr_text)
         except Exception as e:
             print(f"[Error] 转码失败: {e}")
         return None
+
+    def _probe_video_codec(self, video_path):
+        """Best-effort probe of the first video stream codec."""
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip().lower() or None
+        except Exception:
+            return None
 
     def _embed_and_add_to_index(self, frame_buffer, timestamp_buffer, path_buffer):
         """Batch encode frames and add to FAISS index"""
@@ -225,6 +259,16 @@ class VideoRetriever:
         print(f"[Processing] Processing video: {os.path.basename(video_path)}")
         self._reset_session_state()
 
+        already_transcoded = os.path.splitext(video_path)[0].endswith("_h264")
+        codec_name = self._probe_video_codec(video_path)
+        if codec_name == "av1" and not already_transcoded:
+            print("[Info] Detected AV1 video stream, transcoding to H.264 before OpenCV decode...")
+            new_path = self._convert_to_h264(video_path)
+            if new_path:
+                video_path = new_path
+                already_transcoded = True
+                self._reset_session_state()
+
         first_error = None
         try:
             _, indexed_count = self._process_video_once(
@@ -237,7 +281,6 @@ class VideoRetriever:
             first_error = e
             indexed_count = 0
 
-        already_transcoded = os.path.splitext(video_path)[0].endswith("_h264")
         if indexed_count == 0 and not already_transcoded:
             retry_reason = "OpenCV 读取失败" if first_error else "OpenCV 无法解码实际视频帧"
             print(f"[Warning] {retry_reason}，尝试自动转码...")

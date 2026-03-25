@@ -1,30 +1,50 @@
 import gradio as gr
 import os
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Lock
+from typing import Any, Optional
 
 from video_processor import VideoRetriever
 from vlm_handler import VLMHandler
 from audio_processor import AudioRetriever
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+USER_AVATAR_PATH = os.path.join(APP_DIR, "assets", "avatar_user.svg")
+ASSISTANT_AVATAR_PATH = os.path.join(APP_DIR, "assets", "avatar_assistant.svg")
+
 @dataclass
 class AppServices:
-    vlm: VLMHandler
-    retriever: VideoRetriever
-    audio_retriever: AudioRetriever
+    vlm: Optional[VLMHandler] = None
+    retriever: Optional[VideoRetriever] = None
+    audio_retriever: Optional[AudioRetriever] = None
+    _vlm_lock: Any = field(default_factory=Lock, repr=False)
+    _retrieval_lock: Any = field(default_factory=Lock, repr=False)
+
+    def ensure_retrievers(self):
+        """Load retrieval models on first upload only."""
+        with self._retrieval_lock:
+            if self.retriever is None:
+                print("[Lazy Load] Initializing VideoRetriever...")
+                self.retriever = VideoRetriever()
+            if self.audio_retriever is None:
+                print("[Lazy Load] Initializing AudioRetriever...")
+                self.audio_retriever = AudioRetriever()
+        return self.retriever, self.audio_retriever
+
+    def ensure_vlm(self):
+        """Load the VLM on first chat request only."""
+        with self._vlm_lock:
+            if self.vlm is None:
+                print("[Lazy Load] Initializing VLMHandler...")
+                self.vlm = VLMHandler()
+        return self.vlm
 
 
 def init_services():
-    print("正在初始化 Web 系统 (这可能需要加载多个模型)...")
+    print("正在初始化 Web 系统 (Lazy Load 模式，模型将在首次使用时加载)...")
     try:
-        services = AppServices(
-            vlm=VLMHandler(),
-            retriever=VideoRetriever(),
-            audio_retriever=AudioRetriever(),
-        )
-        if not services.vlm.available:
-            print("[Init Warning] VLM is unavailable. Retrieval UI is usable, but final answer generation will be degraded.")
-        return services
+        return AppServices()
     except Exception as e:
         print(f"模型加载出错: {e}")
         raise
@@ -36,26 +56,41 @@ def process_upload_impl(video_path, services: AppServices):
         yield "请上传视频", None
         return
 
-    loading_html = (
-        f"<div class='loading-pane'>"
-        f"<div class='spinner'></div>"
-        f"<div class='loading-text'>正在处理 <b>{os.path.basename(video_path)}</b>...</div>"
-        f"<div class='loading-subtext'>提取视觉关键帧中，请稍候</div>"
-        f"</div>"
-    )
-    yield loading_html, None
+    retriever = services.retriever
+    audio_retriever = services.audio_retriever
+    needs_retriever_init = services.retriever is None or services.audio_retriever is None
+    if needs_retriever_init:
+        loading_html = (
+            "<div class='loading-pane'>"
+            "<div class='spinner'></div>"
+            "<div class='loading-text'>首次上传，正在初始化检索模型...</div>"
+            "<div class='loading-subtext'>将按需加载 CLIP、Whisper 与文本向量模型</div>"
+            "</div>"
+        )
+        yield loading_html, None
 
     try:
-        services.retriever.process_video(video_path, max_duration_minutes=None)
+        if needs_retriever_init:
+            retriever, audio_retriever = services.ensure_retrievers()
+
+        loading_html = (
+            f"<div class='loading-pane'>"
+            f"<div class='spinner'></div>"
+            f"<div class='loading-text'>正在处理 <b>{os.path.basename(video_path)}</b>...</div>"
+            f"<div class='loading-subtext'>提取视觉关键帧中，请稍候</div>"
+            f"</div>"
+        )
+        yield loading_html, None
+        retriever.process_video(video_path, max_duration_minutes=None)
         loading_html = (
             f"<div class='loading-pane'>"
             f"<div class='spinner'></div>"
             f"<div class='loading-text'>正在进行音频转录</div>"
-            f"<div class='loading-subtext'>使用 Whisper Large-v3 模型处理中...</div>"
+            f"<div class='loading-subtext'>使用 Whisper 模型处理中...</div>"
             f"</div>"
         )
         yield loading_html, None
-        services.audio_retriever.process_audio(video_path)
+        audio_retriever.process_audio(video_path)
         stats = (
             f"<div class='success-pane'>"
             f"<div class='success-header'>"
@@ -63,8 +98,8 @@ def process_upload_impl(video_path, services: AppServices):
             f"<span class='success-title'>索引构建完成！</span>"
             f"</div>"
             f"<div class='stats-grid'>"
-            f"<div class='stat-item'><span class='stat-label'>视觉关键帧</span><span class='stat-value'>{services.retriever.index.ntotal}</span><span class='stat-unit'>帧</span></div>"
-            f"<div class='stat-item'><span class='stat-label'>音频片段</span><span class='stat-value'>{services.audio_retriever.index.ntotal}</span><span class='stat-unit'>条</span></div>"
+            f"<div class='stat-item'><span class='stat-label'>视觉关键帧</span><span class='stat-value'>{retriever.index.ntotal}</span><span class='stat-unit'>帧</span></div>"
+            f"<div class='stat-item'><span class='stat-label'>音频片段</span><span class='stat-value'>{audio_retriever.index.ntotal}</span><span class='stat-unit'>条</span></div>"
             f"</div>"
             f"<div class='ready-badge'><span class='ready-icon'>✨</span> Ready to Chat!</div>"
             f"</div>"
@@ -77,7 +112,7 @@ def process_upload_impl(video_path, services: AppServices):
 
 def chat_engine_impl(query, services: AppServices):
     """Core Q&A logic with multimodal retrieval"""
-    if services.retriever.index.ntotal == 0:
+    if services.retriever is None or services.audio_retriever is None or services.retriever.index.ntotal == 0:
         return "<div class='warn-pane'>⚠️ 请先在左侧上传视频并点击 [构建索引]</div>", []
     print("[App] Visual Search...")
     visual_results = services.retriever.search(query, k=6)
@@ -117,7 +152,8 @@ def chat_engine_impl(query, services: AppServices):
             f"</li>"
         )
     rag_evidence += "</ul></div></div>"
-    answer = services.vlm.chat(query, images_info, audio_results)
+    vlm = services.ensure_vlm()
+    answer = vlm.chat(query, images_info, audio_results)
     final_response = (
         f"{rag_evidence}<div class='divider'></div>"
         f"<div class='ai-answer-title'>🤖 AI 分析结果</div>"
@@ -586,22 +622,25 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     margin-bottom: 1.5rem;
     border-radius: 16px;
     overflow: hidden;
-    box-shadow: 0 8px 24px rgba(139, 92, 246, 0.15);
-    border: 1px solid rgba(139, 92, 246, 0.2);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(242, 246, 255, 0.96));
+    box-shadow: 0 12px 30px rgba(79, 70, 229, 0.14);
+    border: 1px solid rgba(99, 102, 241, 0.22);
 }
 .rag-evidence-title {
-    font-size: 1.25em;
-    background: var(--accent);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+    font-size: 1.12em;
+    color: #f8fbff !important;
+    background: linear-gradient(135deg, #4338ca 0%, #4f46e5 35%, #7c3aed 100%);
+    -webkit-background-clip: border-box !important;
+    -webkit-text-fill-color: #f8fbff !important;
+    background-clip: border-box !important;
     font-weight: 800;
-    padding: 1.25rem 1.5rem;
+    padding: 1rem 1.35rem;
     margin-bottom: 0;
     font-family: 'Montserrat', sans-serif;
     position: relative;
-    background-color: rgba(243, 244, 255, 0.5);
-    backdrop-filter: blur(10px);
+    letter-spacing: 0.02em;
+    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.25);
+    box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.14);
 }
 .rag-evidence-title::after {
     content: "";
@@ -609,14 +648,14 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     bottom: 0;
     left: 0;
     right: 0;
-    height: 2px;
-    background: var(--accent);
-    opacity: 0.4;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.08));
+    opacity: 0.75;
 }
 .evidence-block {
-    background: linear-gradient(135deg, rgba(243, 244, 255, 0.95), rgba(250, 250, 255, 0.95));
+    background: linear-gradient(135deg, rgba(246, 248, 255, 0.98), rgba(252, 253, 255, 0.98));
     padding: 1.25rem 1.5rem;
-    border-top: 1px solid rgba(139, 92, 246, 0.15);
+    border-top: 1px solid rgba(99, 102, 241, 0.12);
 }
 .evidence-block:last-child {
     border-radius: 0 0 16px 16px;
@@ -627,15 +666,15 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     gap: 0.5rem;
     margin-bottom: 1rem;
     font-size: 1.05em;
-    color: #4c1d95;
+    color: #312e81;
     font-weight: 700;
 }
 .evidence-count {
     font-size: 0.85em;
-    color: #7c3aed;
+    color: #5b21b6;
     font-weight: 600;
     margin-left: auto;
-    background: rgba(139, 92, 246, 0.1);
+    background: rgba(124, 58, 237, 0.12);
     padding: 0.25rem 0.75rem;
     border-radius: 12px;
 }
@@ -651,9 +690,10 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
 .evidence-item {
     margin-block: 0.75rem;
     padding: 0.875rem 1rem;
-    background: rgba(255, 255, 255, 0.7);
+    background: rgba(255, 255, 255, 0.96);
     border-radius: 10px;
-    border-left: 3px solid rgba(139, 92, 246, 0.4);
+    border-left: 3px solid rgba(99, 102, 241, 0.45);
+    color: #1e293b;
     transition: all 0.3s ease;
     display: flex;
     align-items: center;
@@ -662,9 +702,9 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
 }
 .evidence-item:hover {
     transform: translateX(4px);
-    background: rgba(255, 255, 255, 0.9);
-    border-left-color: rgba(139, 92, 246, 0.7);
-    box-shadow: 0 4px 12px rgba(139, 92, 246, 0.15);
+    background: rgba(255, 255, 255, 1);
+    border-left-color: rgba(79, 70, 229, 0.78);
+    box-shadow: 0 6px 14px rgba(79, 70, 229, 0.12);
 }
 .timestamp {
     background: linear-gradient(135deg, #ede9fe, #f3e8ff);
@@ -696,11 +736,18 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     white-space: nowrap;
 }
 .aud-text {
-    color: #4c1d95;
-    font-weight: 500;
+    color: #334155;
+    font-weight: 600;
     line-height: 1.6;
     flex: 1;
     min-width: 200px;
+}
+#chatbot img[alt="user avatar"],
+#chatbot img[alt="assistant avatar"] {
+    border-radius: 18px !important;
+    box-shadow: 0 8px 18px rgba(79, 70, 229, 0.16);
+    border: 1px solid rgba(99, 102, 241, 0.18);
+    background: rgba(255, 255, 255, 0.95);
 }
 .divider {
     height: 3px;
@@ -869,7 +916,6 @@ def build_ui(services: AppServices):
 
     with gr.Blocks(
         title="Video-RAG Ultra | 多模态视频理解系统",
-        head=default_light_head,
     ) as demo:
         with gr.Column(elem_classes="container"):
             with gr.Column(elem_classes="header-text"):
@@ -928,7 +974,7 @@ def build_ui(services: AppServices):
                         label="💬 Qwen2.5-VL (Audio-Enhanced)",
                         elem_id="chatbot",
                         height=700,
-                        avatar_images=("👤", "🤖"),
+                        avatar_images=(USER_AVATAR_PATH, ASSISTANT_AVATAR_PATH),
                     )
                     with gr.Row():
                         msg = gr.Textbox(
@@ -996,5 +1042,6 @@ if __name__ == "__main__":
         server_port=server_port,
         share=share,
         theme=theme,
-        css=custom_css
+        css=custom_css,
+        head=default_light_head,
     )
