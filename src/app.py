@@ -1,36 +1,41 @@
 import gradio as gr
+import base64
+import html
 import os
+import shutil
 import traceback
+import uuid
 from dataclasses import dataclass, field
+from io import BytesIO
 from threading import Lock
 from typing import Any, Optional
 
+from PIL import Image
 from video_processor import VideoRetriever
 from vlm_handler import VLMHandler
 from audio_processor import AudioRetriever
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_RUNTIME_DIR = os.path.abspath(os.path.join(APP_DIR, "..", "data", "runtime"))
 USER_AVATAR_PATH = os.path.join(APP_DIR, "assets", "avatar_user.svg")
 ASSISTANT_AVATAR_PATH = os.path.join(APP_DIR, "assets", "avatar_assistant.svg")
 
 @dataclass
-class AppServices:
-    vlm: Optional[VLMHandler] = None
+class SessionResources:
+    session_id: str
     retriever: Optional[VideoRetriever] = None
     audio_retriever: Optional[AudioRetriever] = None
-    _vlm_lock: Any = field(default_factory=Lock, repr=False)
-    _retrieval_lock: Any = field(default_factory=Lock, repr=False)
+    current_job_id: Optional[str] = None
+    current_job_dir: Optional[str] = None
+    last_upload_status: Optional[dict] = None
 
-    def ensure_retrievers(self):
-        """Load retrieval models on first upload only."""
-        with self._retrieval_lock:
-            if self.retriever is None:
-                print("[Lazy Load] Initializing VideoRetriever...")
-                self.retriever = VideoRetriever()
-            if self.audio_retriever is None:
-                print("[Lazy Load] Initializing AudioRetriever...")
-                self.audio_retriever = AudioRetriever()
-        return self.retriever, self.audio_retriever
+
+@dataclass
+class AppServices:
+    vlm: Optional[VLMHandler] = None
+    sessions: dict = field(default_factory=dict)
+    _vlm_lock: Any = field(default_factory=Lock, repr=False)
+    _session_lock: Any = field(default_factory=Lock, repr=False)
 
     def ensure_vlm(self):
         """Load the VLM on first chat request only."""
@@ -39,6 +44,53 @@ class AppServices:
                 print("[Lazy Load] Initializing VLMHandler...")
                 self.vlm = VLMHandler()
         return self.vlm
+
+    def ensure_session(self, session_id: str) -> SessionResources:
+        with self._session_lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                session = SessionResources(session_id=session_id)
+                self.sessions[session_id] = session
+            return session
+
+    def get_session(self, session_id: Optional[str]) -> Optional[SessionResources]:
+        if not session_id:
+            return None
+        with self._session_lock:
+            return self.sessions.get(session_id)
+
+    def prepare_new_job(self, session_id: str) -> SessionResources:
+        with self._session_lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                session = SessionResources(session_id=session_id)
+                self.sessions[session_id] = session
+
+            if session.current_job_dir and os.path.exists(session.current_job_dir):
+                shutil.rmtree(session.current_job_dir, ignore_errors=True)
+
+            job_id = uuid.uuid4().hex[:12]
+            job_dir = os.path.join(DATA_RUNTIME_DIR, session_id, job_id)
+            keyframe_dir = os.path.join(job_dir, "keyframes")
+            audio_runtime_dir = os.path.join(job_dir, "audio")
+            os.makedirs(job_dir, exist_ok=True)
+
+            if session.retriever is None:
+                print(f"[Session {session_id}] Initializing VideoRetriever...")
+                session.retriever = VideoRetriever(keyframe_dir=keyframe_dir)
+            else:
+                session.retriever.start_new_job(keyframe_dir)
+
+            if session.audio_retriever is None:
+                print(f"[Session {session_id}] Initializing AudioRetriever...")
+                session.audio_retriever = AudioRetriever(runtime_dir=audio_runtime_dir)
+            else:
+                session.audio_retriever.start_new_job(audio_runtime_dir)
+
+            session.current_job_id = job_id
+            session.current_job_dir = job_dir
+            session.last_upload_status = None
+            return session
 
 
 def init_services():
@@ -50,15 +102,77 @@ def init_services():
         raise
 
 
-def process_upload_impl(video_path, services: AppServices):
+def ensure_session_id(session_id: Optional[str]) -> str:
+    return session_id or uuid.uuid4().hex
+
+
+def build_inline_frame_preview(image_path: str, max_size: int = 720) -> str:
+    """Convert a local keyframe into a small inline JPEG preview."""
+    if not image_path or not os.path.exists(image_path):
+        return ""
+
+    try:
+        with Image.open(image_path) as img:
+            preview = img.convert("RGB")
+            preview.thumbnail((max_size, max_size))
+            with BytesIO() as buffer:
+                preview.save(buffer, format="JPEG", quality=88, optimize=True)
+                encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        return ""
+
+
+def build_upload_status_html(video_path, retriever, audio_status):
+    video_name = html.escape(os.path.basename(video_path))
+    audio_status = audio_status or {}
+    audio_success = bool(audio_status.get("success"))
+    audio_count = int(audio_status.get("segment_count", 0) or 0)
+    title = "分析准备完成" if audio_success else "分析已完成"
+    ready_text = "现在可以开始提问" if audio_success else "视觉结果已就绪，可继续提问"
+    detail_html = ""
+
+    if audio_status.get("error"):
+        detail_html = (
+            "<div class='warn-pane'>"
+            f"⚠️ 视觉索引已完成，但音频链路失败：<code>{html.escape(audio_status['error'])}</code><br>"
+            "你仍然可以继续进行基于画面的问答。"
+            "</div>"
+        )
+    elif audio_status.get("warning"):
+        detail_html = (
+            "<div class='warn-pane'>"
+            f"⚠️ {html.escape(audio_status['warning'])}<br>"
+            "你仍然可以继续进行基于画面的问答。"
+            "</div>"
+        )
+
+    return (
+        f"<div class='success-pane'>"
+        f"<div class='success-header'>"
+        f"<div class='check-icon'></div>"
+        f"<span class='success-title'>{title}</span>"
+        f"</div>"
+        f"<div style='margin-bottom: 1rem; color: #475569; font-weight: 600;'>已处理视频：<b>{video_name}</b></div>"
+        f"<div class='stats-grid'>"
+        f"<div class='stat-item'><span class='stat-label'>视觉关键帧</span><span class='stat-value'>{retriever.index.ntotal}</span><span class='stat-unit'>帧</span></div>"
+        f"<div class='stat-item'><span class='stat-label'>音频片段</span><span class='stat-value'>{audio_count}</span><span class='stat-unit'>条</span></div>"
+        f"</div>"
+        f"{detail_html}"
+        f"<div class='ready-badge'><span class='ready-icon'>✨</span> {ready_text}</div>"
+        f"</div>"
+    )
+
+
+def process_upload_impl(video_path, services: AppServices, session_id: Optional[str]):
     """Process video: visual and audio indexing"""
+    session_id = ensure_session_id(session_id)
     if video_path is None:
-        yield "请上传视频", None
+        yield "请上传视频", session_id
         return
 
-    retriever = services.retriever
-    audio_retriever = services.audio_retriever
-    needs_retriever_init = services.retriever is None or services.audio_retriever is None
+    session = services.ensure_session(session_id)
+    needs_retriever_init = session.retriever is None or session.audio_retriever is None
     if needs_retriever_init:
         loading_html = (
             "<div class='loading-pane'>"
@@ -67,11 +181,12 @@ def process_upload_impl(video_path, services: AppServices):
             "<div class='loading-subtext'>将按需加载 CLIP、Whisper 与文本向量模型</div>"
             "</div>"
         )
-        yield loading_html, None
+        yield loading_html, session_id
 
     try:
-        if needs_retriever_init:
-            retriever, audio_retriever = services.ensure_retrievers()
+        session = services.prepare_new_job(session_id)
+        retriever = session.retriever
+        audio_retriever = session.audio_retriever
 
         loading_html = (
             f"<div class='loading-pane'>"
@@ -80,7 +195,7 @@ def process_upload_impl(video_path, services: AppServices):
             f"<div class='loading-subtext'>提取视觉关键帧中，请稍候</div>"
             f"</div>"
         )
-        yield loading_html, None
+        yield loading_html, session_id
         retriever.process_video(video_path, max_duration_minutes=None)
         loading_html = (
             f"<div class='loading-pane'>"
@@ -89,52 +204,67 @@ def process_upload_impl(video_path, services: AppServices):
             f"<div class='loading-subtext'>使用 Whisper 模型处理中...</div>"
             f"</div>"
         )
-        yield loading_html, None
-        audio_retriever.process_audio(video_path)
-        stats = (
-            f"<div class='success-pane'>"
-            f"<div class='success-header'>"
-            f"<div class='check-icon'></div>"
-            f"<span class='success-title'>索引构建完成！</span>"
-            f"</div>"
-            f"<div class='stats-grid'>"
-            f"<div class='stat-item'><span class='stat-label'>视觉关键帧</span><span class='stat-value'>{retriever.index.ntotal}</span><span class='stat-unit'>帧</span></div>"
-            f"<div class='stat-item'><span class='stat-label'>音频片段</span><span class='stat-value'>{audio_retriever.index.ntotal}</span><span class='stat-unit'>条</span></div>"
-            f"</div>"
-            f"<div class='ready-badge'><span class='ready-icon'>✨</span> Ready to Chat!</div>"
-            f"</div>"
-        )
-        yield stats, None
+        yield loading_html, session_id
+        audio_status = audio_retriever.process_audio(video_path)
+        session.last_upload_status = audio_status
+        stats = build_upload_status_html(video_path, retriever, audio_status)
+        yield stats, session_id
     except Exception as e:
         traceback.print_exc()
-        yield f"<div class='error-pane'><span class='error-icon'>❌</span> 处理失败: <code>{str(e)}</code></div>", None
+        error_html = (
+            "<div class='error-pane'>"
+            "<span class='error-icon'>❌</span> 处理失败: "
+            f"<code>{html.escape(str(e))}</code>"
+            "</div>"
+        )
+        yield error_html, session_id
 
 
-def chat_engine_impl(query, services: AppServices):
+def chat_engine_impl(query, services: AppServices, session_id: Optional[str]):
     """Core Q&A logic with multimodal retrieval"""
-    if services.retriever is None or services.audio_retriever is None or services.retriever.index.ntotal == 0:
-        return "<div class='warn-pane'>⚠️ 请先在左侧上传视频并点击 [构建索引]</div>", []
-    print("[App] Visual Search...")
-    visual_results = services.retriever.search(query, k=6)
-    print("[App] Audio Search...")
-    audio_results = services.audio_retriever.search(query, k=6)
+    if not query or not str(query).strip():
+        return "<div class='warn-pane'>⚠️ 请输入一个问题</div>"
 
-    gallery_data, images_info = [], []
+    session = services.get_session(ensure_session_id(session_id))
+    if session is None or session.retriever is None or session.retriever.index.ntotal == 0:
+        return "<div class='warn-pane'>⚠️ 请先在左侧上传视频并点击 [构建索引]</div>"
+
+    print("[App] Visual Search...")
+    visual_results = session.retriever.search(query, k=6)
+    print("[App] Audio Search...")
+    audio_results = []
+    if session.audio_retriever is not None:
+        audio_results = session.audio_retriever.search(query, k=6)
+
+    images_info = []
     rag_evidence = (
         "<div class='rag-evidence-container'>"
-        "<div class='rag-evidence-title'>🔍 RAG 多模态证据</div>"
+        "<div class='rag-evidence-title'>🔎 本轮证据摘要</div>"
         "<div class='evidence-block'>"
-        "<div class='evidence-header'><span class='icon-eye'>👁️</span> <b>视觉证据</b> <span class='evidence-count'>({})</span></div>"
+        "<div class='evidence-header'><span class='icon-eye'>👁️</span> <b>视觉证据</b> "
+        "<span class='evidence-count'>({})</span></div>"
         "<ul class='evidence-list'>"
     ).format(len(visual_results))
-    for ts, score, path in visual_results:
+    for idx, (ts, score, path) in enumerate(visual_results):
         time_str = f"{int(ts)//60:02d}:{int(ts)%60:02d}"
-        gallery_data.append((path, f"Time: {time_str}"))
         images_info.append((ts, score, path))
+        preview_src = build_inline_frame_preview(path)
+        preview_html = (
+            f"<div class='evidence-preview'>"
+            f"<img src='{preview_src}' alt='关键帧 {time_str}' class='evidence-preview-image' />"
+            f"</div>"
+            if preview_src
+            else "<div class='evidence-preview is-empty'>关键帧预览加载失败</div>"
+        )
         rag_evidence += (
-            f"<li class='evidence-item'>"
+            f"<li class='evidence-item visual-evidence-item' data-evidence-id='visual-{idx}' "
+            f"role='button' tabindex='0'>"
+            f"<div class='evidence-item-main'>"
             f"<span class='timestamp'>{time_str}</span>"
-            f"<span class='sim-score'>相似度: {score:.3f}</span>"
+            f"<span class='sim-score'>匹配分数: {score:.3f}</span>"
+            f"<span class='evidence-action'>点击查看关键帧</span>"
+            f"</div>"
+            f"{preview_html}"
             f"</li>"
         )
     rag_evidence += (
@@ -143,11 +273,17 @@ def chat_engine_impl(query, services: AppServices):
         "<div class='evidence-header'><span class='icon-ear'>👂</span> <b>音频证据</b> <span class='evidence-count'>({})</span></div>"
         "<ul class='evidence-list'>"
     ).format(len(audio_results))
-    for start, text, score in audio_results:
+    for item in audio_results:
+        if len(item) >= 4:
+            start, end, text, score = item[:4]
+        else:
+            start, text, score = item[:3]
+            end = start
         time_str = f"{int(start)//60:02d}:{int(start)%60:02d}"
+        end_str = f"{int(end)//60:02d}:{int(end)%60:02d}"
         rag_evidence += (
             f"<li class='evidence-item'>"
-            f"<span class='timestamp'>{time_str}</span>"
+            f"<span class='timestamp'>{time_str}-{end_str}</span>"
             f"<span class='aud-text'>{text[:80]}{'...' if len(text) > 80 else ''}</span>"
             f"</li>"
         )
@@ -159,7 +295,7 @@ def chat_engine_impl(query, services: AppServices):
         f"<div class='ai-answer-title'>🤖 AI 分析结果</div>"
         f"<div class='ai-answer-block'>{answer}</div>"
     )
-    return final_response, gallery_data
+    return final_response
 
 custom_css = """
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
@@ -205,7 +341,7 @@ body, html {
 }
 .header-text { 
     text-align: center; 
-    margin-bottom: 3rem;
+    margin-bottom: 2.25rem;
     animation: fadeInDown 0.8s ease-out;
 }
 @keyframes fadeInDown {
@@ -236,22 +372,23 @@ body, html {
     50% { filter: brightness(1.1) drop-shadow(0 0 30px rgba(139, 92, 246, 0.5)); }
 }
 .header-text p {
-    color: #a78bfa;
-    font-weight: 600;
-    opacity: 0.95;
-    font-size: 1.25em;
-    letter-spacing: 0.05em;
-    margin-top: 0.5rem;
+    color: #e2e8f0;
+    font-weight: 500;
+    opacity: 0.98;
+    font-size: 1.1em;
+    letter-spacing: 0.02em;
+    margin-top: 0.35rem;
+    line-height: 1.7;
 }
 .sidebar-card {
     background: var(--sidebar-bg);
     backdrop-filter: blur(20px);
     border-radius: 24px;
     box-shadow: var(--shadow);
-    padding: 2rem 1.5rem;
+    padding: 1.75rem 1.4rem;
     position: relative;
     border: 1px solid rgba(139, 92, 246, 0.2);
-    min-height: 650px;
+    min-height: 0;
     animation: slideInLeft 0.6s ease-out;
 }
 @keyframes slideInLeft {
@@ -308,7 +445,7 @@ body, html {
     50% { box-shadow: 0 8px 32px rgba(167, 139, 250, 0.25); }
 }
 #chatbot {
-    min-height: 680px;
+    min-height: 630px;
     border-radius: 24px;
     border: 1px solid rgba(139, 92, 246, 0.15);
     background: linear-gradient(135deg, rgba(252, 253, 255, 0.95), rgba(248, 250, 252, 0.95));
@@ -330,7 +467,7 @@ body, html {
 .gradio-gallery { 
     background: transparent !important; 
     gap: 16px !important; 
-    padding: 1rem 0;
+    padding: 0.75rem 0 0;
 }
 .gradio-gallery img { 
     border-radius: 16px; 
@@ -426,13 +563,13 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     -webkit-text-fill-color: #0f172a !important;
 }
 .footer-text {
-    color: #a78bfa;
-    text-align: center;
-    opacity: 0.9;
-    font-size: 1em;
-    margin-top: 1rem;
-    letter-spacing: 0.03em;
+    color: #5b21b6;
+    opacity: 0.82;
+    font-size: 0.95em;
+    margin-top: 0;
+    letter-spacing: 0.02em;
     font-weight: 600;
+    text-align: right;
 }
 /* 加载动画 */
 .loading-pane {
@@ -678,6 +815,20 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     padding: 0.25rem 0.75rem;
     border-radius: 12px;
 }
+.evidence-action {
+    margin-left: 0.75rem;
+    font-size: 0.82em;
+    color: #4338ca;
+    font-weight: 700;
+    background: rgba(79, 70, 229, 0.08);
+    padding: 0.25rem 0.7rem;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.evidence-action.is-disabled {
+    color: #94a3b8;
+    background: rgba(148, 163, 184, 0.12);
+}
 .icon-eye, .icon-ear {
     font-weight: 900;
     font-size: 1.2em;
@@ -699,6 +850,22 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     align-items: center;
     gap: 0.75rem;
     flex-wrap: wrap;
+}
+.visual-evidence-item {
+    cursor: pointer;
+    align-items: stretch;
+}
+.visual-evidence-item.is-open {
+    border-left-color: rgba(79, 70, 229, 0.82);
+    box-shadow: 0 10px 22px rgba(79, 70, 229, 0.16);
+    background: linear-gradient(135deg, rgba(255, 255, 255, 1), rgba(244, 247, 255, 1));
+}
+.evidence-item-main {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    width: 100%;
 }
 .evidence-item:hover {
     transform: translateX(4px);
@@ -741,6 +908,37 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     line-height: 1.6;
     flex: 1;
     min-width: 200px;
+}
+.evidence-preview {
+    width: 100%;
+    max-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    margin-top: 0;
+    transition: max-height 0.28s ease, opacity 0.28s ease, margin-top 0.28s ease;
+}
+.visual-evidence-item.is-open .evidence-preview {
+    max-height: 260px;
+    opacity: 1;
+    margin-top: 0.85rem;
+}
+.evidence-preview-image {
+    display: block;
+    width: 100%;
+    max-height: 220px;
+    object-fit: cover;
+    border-radius: 14px;
+    border: 1px solid rgba(139, 92, 246, 0.24);
+    box-shadow: 0 10px 24px rgba(99, 102, 241, 0.18);
+    background: rgba(255, 255, 255, 0.98);
+}
+.evidence-preview.is-empty {
+    padding: 0.95rem 1rem;
+    border-radius: 12px;
+    color: #64748b;
+    font-weight: 600;
+    background: rgba(241, 245, 249, 0.95);
+    border: 1px dashed rgba(148, 163, 184, 0.4);
 }
 #chatbot img[alt="user avatar"],
 #chatbot img[alt="assistant avatar"] {
@@ -829,8 +1027,20 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
     margin-bottom: 1rem !important;
     font-family: 'Montserrat', sans-serif !important;
 }
-.gallery-accordion {
-    margin-top: 1rem;
+.main-workspace {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+.chat-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 0.15rem;
+}
+.chat-meta-row .gradio-button {
+    max-width: 160px;
 }
 /* 响应式优化 */
 @media (max-width: 768px) {
@@ -847,8 +1057,18 @@ input::placeholder, textarea::placeholder, .gradio-textbox textarea::placeholder
         min-height: auto;
     }
     #chatbot {
-        min-height: 500px;
-        height: 500px;
+        min-height: 520px;
+        height: 520px;
+    }
+    .chat-meta-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .footer-text {
+        text-align: left;
+    }
+    .visual-evidence-item.is-open .evidence-preview {
+        max-height: 220px;
     }
 }
 /* 滚动条美化 */
@@ -884,7 +1104,39 @@ default_light_head = """
     if (!url.searchParams.has("__theme")) {
         url.searchParams.set("__theme", "light");
         window.location.replace(url.toString());
+        return;
     }
+
+    document.addEventListener("click", (event) => {
+        const item = event.target.closest(".visual-evidence-item");
+        if (!item) {
+            return;
+        }
+        const isOpen = item.classList.contains("is-open");
+        document.querySelectorAll(".visual-evidence-item.is-open").forEach((node) => {
+            node.classList.remove("is-open");
+        });
+        if (!isOpen) {
+            item.classList.add("is-open");
+        }
+    });
+
+    document.addEventListener("keydown", (event) => {
+        const item = event.target.closest(".visual-evidence-item");
+        if (!item) {
+            return;
+        }
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            const isOpen = item.classList.contains("is-open");
+            document.querySelectorAll(".visual-evidence-item.is-open").forEach((node) => {
+                node.classList.remove("is-open");
+            });
+            if (!isOpen) {
+                item.classList.add("is-open");
+            }
+        }
+    });
 })();
 </script>
 """
@@ -902,14 +1154,15 @@ def extract_query(history):
 
 
 def build_ui(services: AppServices):
-    def _process_upload(video_path):
-        yield from process_upload_impl(video_path, services)
+    def _process_upload(video_path, session_id):
+        yield from process_upload_impl(video_path, services, session_id)
 
-    def _bot_msg(history):
+    def _bot_msg(history, session_id):
         query = extract_query(history)
-        response, images = chat_engine_impl(query, services)
+        session_id = ensure_session_id(session_id)
+        response = chat_engine_impl(query, services, session_id)
         history.append({"role": "assistant", "content": response})
-        return history, images
+        return history, session_id
 
     def _user_msg(user_message, history):
         return "", history + [{"role": "user", "content": user_message}]
@@ -917,6 +1170,7 @@ def build_ui(services: AppServices):
     with gr.Blocks(
         title="Video-RAG Ultra | 多模态视频理解系统",
     ) as demo:
+        session_state = gr.State(None)
         with gr.Column(elem_classes="container"):
             with gr.Column(elem_classes="header-text"):
                 gr.Markdown(
@@ -924,62 +1178,49 @@ def build_ui(services: AppServices):
                     elem_id="main-title"
                 )
                 gr.Markdown(
-                    "<p style='margin-top: 0.5rem;'>让 AI 成为你的视频大脑</p>"
-                    "<p style='font-size: 1.1em; margin-top: 0.25rem;'>"
-                    "<span style='color:#a78bfa; font-weight: 600;'>超长视频理解 · 视觉 + 音频 检索增强生成 (RAG)</span>"
-                    "</p>",
+                    "<p>多模态视频理解与问答助手</p>"
+                    "<p>上传视频后自动构建视觉与音频索引，基于证据完成视频问答</p>",
                     elem_id="subtitle"
                 )
             with gr.Row(equal_height=False):
                 with gr.Column(scale=3, elem_classes="sidebar-card"):
                     gr.Markdown(
-                        "### 🎛️ 控制中心",
+                        "### 任务面板",
                         elem_classes="section-title"
                     )
                     video_in = gr.Video(
-                        label="🌟 上传视频",
+                        label="上传待分析视频",
                         sources=["upload"],
                         height=260,
                         interactive=True
                     )
                     btn_process = gr.Button(
-                        "🚀 构建索引",
+                        "开始分析",
                         variant="primary",
                         elem_classes="primary-btn",
                         scale=1
                     )
                     gr.Markdown("---")
                     gr.Markdown(
-                        "#### 📊 系统状态",
+                        "#### 处理状态",
                         elem_classes="section-title"
                     )
                     status_display = gr.Markdown(
                         "<div style='text-align: center; padding: 1rem; color: #64748b;'>"
-                        "⏸️ 等待视频上传...</div>",
+                        "等待上传视频并开始分析</div>",
                         elem_id="status-markdown"
                     )
-                    with gr.Accordion(
-                        "🖼️ 检索关键帧画廊",
-                        open=False,
-                        elem_classes="gallery-accordion"
-                    ):
-                        gallery = gr.Gallery(
-                            label="Visual Evidence",
-                            columns=3,
-                            height=360,
-                            show_label=False
-                        )
-                with gr.Column(scale=7):
+                with gr.Column(scale=7, elem_classes="main-workspace"):
                     chatbot = gr.Chatbot(
-                        label="💬 Qwen2.5-VL (Audio-Enhanced)",
+                        label="智能视频问答",
                         elem_id="chatbot",
-                        height=700,
+                        height=630,
                         avatar_images=(USER_AVATAR_PATH, ASSISTANT_AVATAR_PATH),
                     )
                     with gr.Row():
                         msg = gr.Textbox(
                             show_label=False,
-                            placeholder="💡 请输入关于视频的提问，例如：'老师讲了哪三个核心概念？' 或 '视频中出现了哪些场景？'",
+                            placeholder="请输入你想了解的视频内容，例如：视频里的人在做什么？有哪些关键场景？",
                             scale=9,
                             container=False,
                             elem_id="chat-input",
@@ -987,32 +1228,32 @@ def build_ui(services: AppServices):
                             lines=2
                         )
                         btn_send = gr.Button(
-                            "发送 ✨",
+                            "发送",
                             variant="primary",
                             scale=1,
                             elem_classes="primary-btn",
                             size="lg"
                         )
-                    with gr.Row():
+                    with gr.Row(elem_classes="chat-meta-row"):
                         btn_clear = gr.Button(
-                            "🗑️ 清空历史",
+                            "清空对话",
                             size="sm",
                             variant="secondary",
                             scale=1
                         )
                         gr.Markdown(
-                            "<div style='text-align: right;'>"
-                            "<span style='font-weight: 600; color: #a78bfa;'>"
-                            "🚀 <b>Powered by</b> 多卡 RTX 3090 | Qwen2.5-VL | Whisper-v3"
+                            "<div>"
+                            "<span style='font-weight: 600;'>"
+                            "多模态视频问答 · 视觉检索 · 音频理解 · 证据化回答"
                             "</span></div>",
                             elem_classes="footer-text",
                         )
-        btn_process.click(_process_upload, [video_in], [status_display, gallery])
+        btn_process.click(_process_upload, [video_in, session_state], [status_display, session_state])
         msg.submit(_user_msg, [msg, chatbot], [msg, chatbot], queue=False).then(
-            _bot_msg, [chatbot], [chatbot, gallery]
+            _bot_msg, [chatbot, session_state], [chatbot, session_state]
         )
         btn_send.click(_user_msg, [msg, chatbot], [msg, chatbot], queue=False).then(
-            _bot_msg, [chatbot], [chatbot, gallery]
+            _bot_msg, [chatbot, session_state], [chatbot, session_state]
         )
         btn_clear.click(lambda: [], None, chatbot, queue=False)
 
@@ -1021,13 +1262,8 @@ def build_ui(services: AppServices):
 if __name__ == "__main__":
     services = init_services()
     demo = build_ui(services)
-    port_env = os.getenv("GRADIO_SERVER_PORT")
+    port_env = os.getenv("GRADIO_SERVER_PORT", "").strip()
     share_env = os.getenv("GRADIO_SHARE", "").strip().lower()
-    try:
-        server_port = int(port_env) if port_env else 7860
-    except ValueError:
-        print(f"[Warning] Invalid GRADIO_SERVER_PORT={port_env}, fallback to 7860")
-        server_port = 7860
 
     if share_env in {"", "0", "false", "no", "off"}:
         share = False
@@ -1037,11 +1273,22 @@ if __name__ == "__main__":
         print(f"[Warning] Invalid GRADIO_SHARE={share_env}, fallback to False")
         share = False
 
+    launch_kwargs = {
+        "server_name": "0.0.0.0",
+        "share": share,
+        "theme": theme,
+        "css": custom_css,
+        "head": default_light_head,
+    }
+
+    if port_env:
+        try:
+            launch_kwargs["server_port"] = int(port_env)
+        except ValueError:
+            print(f"[Warning] Invalid GRADIO_SERVER_PORT={port_env}, let Gradio auto-select a free port")
+    else:
+        print("[Info] GRADIO_SERVER_PORT not set, Gradio will auto-select a free port.")
+
     demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=server_port,
-        share=share,
-        theme=theme,
-        css=custom_css,
-        head=default_light_head,
+        **launch_kwargs,
     )
