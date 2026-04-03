@@ -1,14 +1,10 @@
-# Video-RAG Ultra
-
 <div align="center">
+
+<h1>Video-RAG Ultra</h1>
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-
-**多模态视频理解与问答助手**
-
-上传视频后自动构建视觉与音频索引，基于证据完成视频问答。
 
 `👁️ OpenCLIP` · `🎙️ faster-whisper` · `🧠 bge-m3` · `🤖 Qwen2.5-VL` · `🏁 Video-MME`
 
