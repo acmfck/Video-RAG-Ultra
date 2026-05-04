@@ -15,7 +15,8 @@
 ## ✨ 项目介绍
 
 <img width="2760" height="1504" alt="video-rag-ultra-en" src="https://github.com/user-attachments/assets/a68991d9-7d5a-45fc-82c5-9267876fea98" />
-<img width="2760" height="1504" alt="video-rag-ultra-detail_en" src="https://github.com/user-attachments/assets/41aa7d8d-78eb-458b-a330-d099d9f085d6" />
+<img width="2000" height="1125" alt="image" src="https://github.com/user-attachments/assets/3d2c348d-71e2-4267-8fab-8bf56b8a9ab4" />
+
 
 
 Video-RAG Ultra 是一个面向长视频问答的多模态 RAG 系统，围绕“检索证据 + 多模态推理”构建。当前版本默认使用 OpenCLIP 做视觉检索、`faster-whisper large-v3` 做音频转录、`bge-m3` 做文本向量检索，并结合 `Qwen2.5-VL-7B-Instruct` 生成最终回答。
