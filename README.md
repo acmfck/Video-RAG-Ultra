@@ -14,7 +14,7 @@
   
 ## ✨ 项目介绍
 
-<img width="2760" height="1504" alt="video-rag-ultra-en" src="https://github.com/user-attachments/assets/a68991d9-7d5a-45fc-82c5-9267876fea98" />
+<img width="8960" height="5040" alt="video-rag_zh-new" src="https://github.com/user-attachments/assets/253dfe0c-403a-45bb-bbd2-60eeca3efc3a" />
 
 <img width="8960" height="5040" alt="video-rag_detail_zh_new" src="https://github.com/user-attachments/assets/c1427e33-b5e2-4e12-9dd2-6d5a41bd4529" />
 
